@@ -1,0 +1,183 @@
+# Todo-list app: mariadb + todobackend + todofrontend
+# Adapted from labs-docker-k8s/kubernetes.yml
+#
+# Build the images first (from lab-kubernetes/):
+#   docker build -t todobackend  -f todo-backend/Dockerfile  todo-backend
+#   docker build -t todofrontend -f todo-frontend/Dockerfile todo-frontend
+# Create the DB password Secret (kept out of this file and of git):
+#   kubectl create secret generic mariadb-secret --from-literal=password=<password>
+# Then:
+#   kubectl apply -f lab-kubernetes/kubernetes.yml
+#   open http://localhost:8080
+#
+# Services are declared first so their DNS names exist before the pods start
+# (nginx resolves "todobackend" at startup).
+apiVersion: v1
+kind: Service
+metadata:
+  name: mariadb
+spec:
+  selector:
+    app: mariadb
+  ports:
+  - protocol: TCP
+    port: 3306
+    targetPort: 3306
+---
+apiVersion: v1
+kind: Service
+metadata:
+  # Must match proxy_pass in todo-frontend/nginx.conf
+  name: todobackend
+spec:
+  selector:
+    app: todobackend
+  ports:
+  - protocol: TCP
+    port: 3000
+    targetPort: 3000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: todofrontend
+spec:
+  # LoadBalancer: Docker Desktop exposes it on localhost:8080 (NodePort must be 30000-32767)
+  type: LoadBalancer
+  selector:
+    app: todofrontend
+  ports:
+  - protocol: TCP
+    port: 8080
+    targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mariadb-deployment
+  labels:
+    app: mariadb
+spec:
+  selector:
+    matchLabels:
+      app: mariadb
+  # No volume: data is lost when the pod restarts
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: mariadb
+    spec:
+      containers:
+      - name: mariadb-container
+        image: mariadb:latest
+        ports:
+        - containerPort: 3306
+        env:
+        - name: MARIADB_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mariadb-secret
+              key: password
+        # Database name used by the backend (DATABASE_NAME)
+        - name: MARIADB_DATABASE
+          value: todo
+        readinessProbe:
+          tcpSocket:
+            port: 3306
+          initialDelaySeconds: 10
+          periodSeconds: 5
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: todobackend-deployment
+  labels:
+    app: todobackend
+spec:
+  selector:
+    matchLabels:
+      app: todobackend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: todobackend
+    spec:
+      containers:
+      - name: todobackend-container
+        image: todobackend:latest
+        # Local image: with the "latest" tag the default policy is Always
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 3000
+        env:
+        - name: DATABASE_SVC
+          value: mariadb
+        - name: DATABASE_PORT
+          value: "3306"
+        - name: DATABASE_NAME
+          value: todo
+        - name: DATABASE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mariadb-secret
+              key: password
+        - name: PORT
+          value: "3000"
+        # "/" returns 500 if the DB connection failed at startup
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 3
+        # Restart the backend until it starts with the DB available
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: todofrontend-deployment
+  labels:
+    app: todofrontend
+spec:
+  selector:
+    matchLabels:
+      app: todofrontend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: todofrontend
+    spec:
+      containers:
+      - name: todofrontend-container
+        image: todofrontend:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 3
